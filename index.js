@@ -1,133 +1,132 @@
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    Browsers,
-    jidNormalizedUser
-} = require('@whiskeysockets/baileys');
-
+const { default: makeWASocket, useMultiFileAuthState, Browsers } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const express = require('express');
 
-// ⚠️ APNA WOH PHONE NUMBER DALEIN JISSE BOT CHALANA HAI (Bina '+' ya spaces ke)
-const MY_BOT_NUMBER = '919931655821'; 
-const TARGET_NUMBER = '919931005943';
+// Render/Cloud पर बोट को एक्टिव रखने के लिए Web Server
+const app = express();
+const PORT = process.env.PORT || 8080;
+app.get('/', (req, res) => res.send('WhatsApp Bot is Online!'));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
-async function connectToWhatsApp() {
-
-    // Railway Volume memory path setup
-    const { state, saveCreds } = await useMultiFileAuthState('/app/auth_info_baileys');
+async function startBot() {
+    // क्रेडेंशियल्स स्टोर करने के लिए फोल्डर
+    const { state, saveCreds } = await useMultiFileAuthState('auth_session');
 
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome') // Server par mandatory line
+        browser: Browsers.macOS('Chrome'),
+        printQRInTerminal: false
     });
 
-    // Credentials automatically save honge jab code link ho jayega
     sock.ev.on('creds.update', saveCreds);
 
-    // =========================================
-    // 🔑 OTP / PAIRING CODE LOGIC (SIRF 1 BAAR CHALEGA)
-    // =========================================
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                // Number verification ke liye check krein
-                let cleanNumber = MY_BOT_NUMBER.replace(/[^0-9]/g, '');
-                let code = await sock.requestPairingCode(cleanNumber);
-                
-                console.log('\n==================================================');
-                console.log(`🔑 APNA LINKING CODE (OTP) YAHAN HAI: ${code}`);
-                console.log('==================================================\n');
-            } catch (err) {
-                console.log('❌ Pairing code generation error:', err.message);
-            }
-        }, 5000); // WebSocket loading ke liye 5 seconds ka safe delay
-    }
-
-    const sentByBot = new Set();
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'open') {
-            console.log('✅ WhatsApp successfully connected!');
-            console.log('🤖 Auto reply active ho chuka hai.');
-            console.log('🎯 Target Phone Number:', TARGET_NUMBER);
-        }
-
+    sock.ev.on('connection.update', async (update) => {
+        const { connection } = update;
         if (connection === 'close') {
-            const code = lastDisconnect?.error?.output?.statusCode;
-            if (code !== DisconnectReason.loggedOut) {
-                console.log('🔄 Server disconnected. Reconnecting...');
-                setTimeout(() => { connectToWhatsApp(); }, 3000);
-            } else {
-                console.log('❌ WhatsApp session logged out. GitHub par jake code fir se restart krein.');
-            }
+            console.log('🔌 कनेक्शन बंद हुआ। दोबारा प्रयास कर रहे हैं...');
+            startBot();
+        } else if (connection === 'open') {
+            console.log('✅ बोट सफलतापूर्वक लाइव हो चुका है!');
         }
     });
 
-    // =========================================
-    // INCOMING MESSAGES LOGIC
-    // =========================================
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        try {
-            for (const msg of messages) {
-                if (!msg?.message) continue;
-                const jid = msg.key.remoteJid;
-                if (!jid || jid === 'status@broadcast' || jid.endsWith('@g.us')) continue;
+    // 🚀 मैसेज रिसीव और ऑटो-रिप्लाई लॉजिक
+    sock.ev.on('messages.upsert', async (m) => {
+        for (const msg of m.messages) {
+            
+            // 🛡️ लूप-प्रूफ फिल्टर्स
+            if (!msg.message) continue; 
+            if (msg.key.fromMe) continue; 
+            if (msg.key.id.startsWith('BAE5') || msg.key.id.startsWith('3EB0')) continue; 
 
-                if (sentByBot.has(msg.key.id)) {
-                    sentByBot.delete(msg.key.id);
-                    continue;
+            const fromNumber = msg.key.remoteJid; 
+            
+            // मैसेजेस से टेक्स्ट निकालना
+            const incomingText = 
+                msg.message.conversation || 
+                msg.message.extendedTextMessage?.text || 
+                "";
+
+            if (incomingText) {
+                // टेक्स्ट को साफ़ करें (लोअरकेस और बिना फालतू स्पेस के)
+                const cleanText = incomingText.trim().toLowerCase();
+
+                // 👑 1. आपका ओरिजिनल "-raja" लॉजिक (यह किसी भी मैसेज के अंत में काम करेगा)
+                if (cleanText.endsWith('-raja')) {
+                    const replyMessage = "जी राजा जी! बताइए मैं आपकी क्या सेवा कर सकता हूँ? 👑";
+                    await sock.sendMessage(fromNumber, { text: replyMessage }, { quoted: msg });
+                    continue; // अगले मैसेज पर जाएँ
                 }
 
-                let phoneNumber = null;
-                if (jid.endsWith('@s.whatsapp.net')) {
-                    phoneNumber = jid.split('@')[0];
-                } else if (jid.endsWith('@lid')) {
-                    try {
-                        const lid = jidNormalizedUser(jid);
-                        const resolved = await sock.signalRepository?.lidMapping?.getPNForLID(lid);
-                        if (resolved) phoneNumber = resolved.split('@')[0];
-                    } catch (e) { continue; }
+                // ℹ️ 2. हेल्प कमांड (सारे कीवर्ड्स की लिस्ट भेजने के लिए)
+                if (cleanText === 'help' || cleanText === 'बोट' || cleanText === 'menu') {
+                    const helpMenu = `🤖 *नमस्ते! मैं आपका ऑटो-रिप्लाई बोट हूँ।* \n\n` +
+                                     `यहाँ मेरे सभी एक्टिव *कीवर्ड्स (Keywords)* की लिस्ट है, जिन्हें आप चैट में भेज सकते हैं:\n\n` +
+                                     `🔹 *[कोई भी मैसेज] -raja* - राजा जी वाला स्पेशल रिप्लाई\n` +
+                                     `🔹 *hi* / *hello* - बोट से ग्रीटिंग्स पाएँ\n` +
+                                     `🔹 *ping* - बोट की एक्टिविटी और स्पीड चेक करें\n` +
+                                     `🔹 *gm* / *good morning* - सुबह की विश\n` +
+                                     `🔹 *gn* / *good night* - रात की विश\n` +
+                                     `🔹 *kaise ho* - बोट का हाल-चाल पूछें\n` +
+                                     `🔹 *shayari* - एक शानदार मोटिवेशनल शायरी सुनें\n` +
+                                     `🔹 *owner* - बोट के असली मालिक की जानकारी\n` +
+                                     `🔹 *bye* - बोट को अलविदा कहें\n\n` +
+                                     `💡 _नोट: बोट को कमांड्स भेजने के लिए ऊपर दिए गए शब्दों को ठीक वैसे ही टाइप करें!_`;
+                    
+                    await sock.sendMessage(fromNumber, { text: helpMenu }, { quoted: msg });
                 }
 
-                let isTarget = (phoneNumber === TARGET_NUMBER);
-                let isSelf = false;
-
-                if (sock.user?.id) {
-                    const myNumber = sock.user.id.split(':')[0];
-                    if (phoneNumber === myNumber) isSelf = true;
+                // 🤖 3. सामान्य कीवर्ड्स (Hi/Hello)
+                else if (cleanText === 'hi' || cleanText === 'hello') {
+                    await sock.sendMessage(fromNumber, { text: "नमस्ते! स्वागत है आपका। मुझे आपकी सेवा में तैनात किया गया है! 🤖✨" }, { quoted: msg });
                 }
 
-                if (!(isTarget || isSelf || msg.key.fromMe)) continue;
-
-                const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-                if (!text.trim()) continue;
-
-                const command = text.trim().toLowerCase();
-                let reply = 'Message received 👍';
-
-                if (command === 'hi' || command === 'hii' || command === 'hello') {
-                    reply = 'Hello bro 👋';
-                } else if (command === 'help') {
-                    reply = `🤖 Available commands:\n\nhi\nhello\nhelp\nresult`;
-                } else if (command === 'result') {
-                    reply = '📚 Apna Student ID bhejo.';
+                // 🏓 4. पिंग टेस्ट
+                else if (cleanText === 'ping') {
+                    await sock.sendMessage(fromNumber, { text: "🏓 Pong! बोट सुपर फ़ास्ट स्पीड से एक्टिव है।" }, { quoted: msg });
                 }
 
-                const sent = await sock.sendMessage(jid, { text: reply });
-                if (sent?.key?.id) {
-                    sentByBot.add(sent.key.id);
-                    setTimeout(() => { sentByBot.delete(sent.key.id); }, 30000);
+                // 🌅 5. गुड मॉर्निंग
+                else if (cleanText === 'gm' || cleanText === 'good morning') {
+                    await sock.sendMessage(fromNumber, { text: "सुप्रभात! आपका आज का दिन मंगलमय और खुशियों से भरा हो। ☀️🌸" }, { quoted: msg });
+                }
+
+                // 🌃 6. गुड नाइट
+                else if (cleanText === 'gn' || cleanText === 'good night') {
+                    await sock.sendMessage(fromNumber, { text: "शुभ रात्रि! मीठे सपनों के साथ आराम कीजिए। 🌙😴" }, { quoted: msg });
+                }
+
+                // 💬 7. कैसे हो?
+                else if (cleanText === 'kaise ho' || cleanText === 'how are you') {
+                    await sock.sendMessage(fromNumber, { text: "मैं तो एक डिजिटल बोट हूँ, हमेशा एकदम फर्स्ट क्लास! आप बताइए, आप कैसे हैं? 😇" }, { quoted: msg });
+                }
+
+                // 📜 8. शायरी कमांड
+                else if (cleanText === 'shayari' || cleanText === 'शायरी') {
+                    const shayariList = [
+                        "सफ़र में धूप तो होगी जो चल सको तो चलो,\nसभी हैं भीड़ में तुम भी निकल सको तो चलो! 💫",
+                        "मंजिलें उन्हीं को मिलती हैं जिनके सपनों में जान होती है,\nपंखों से कुछ नहीं होता हौसलों से उड़ान होती है! 🚀",
+                        "खोकर पाने का मज़ा ही कुछ और है,\nरोकर मुस्कुराने का मज़ा ही कुछ और है! ✨"
+                    ];
+                    // रैंडम शायरी चुनना
+                    const randomShayari = shayariList[Math.floor(Math.random() * shayariList.length)];
+                    await sock.sendMessage(fromNumber, { text: randomShayari }, { quoted: msg });
+                }
+
+                // 👑 9. ओनर इन्फो
+                else if (cleanText === 'owner' || cleanText === 'मालिक') {
+                    await sock.sendMessage(fromNumber, { text: "😎 इस बोट के सम्मानीय ओनर (Owner) आप खुद हैं, राजा जी!" }, { quoted: msg });
+                }
+
+                // 👋 10. बाय (Bye)
+                else if (cleanText === 'bye' || cleanText === 'अल्विदा') {
+                    await sock.sendMessage(fromNumber, { text: "बाय-बाय! अपना ख्याल रखिएगा। फिर मिलेंगे! 👋😊" }, { quoted: msg });
                 }
             }
-        } catch (error) {
-            console.log('❌ Auto reply handling error:', error);
         }
     });
 }
 
-console.log('🚀 Starting bot with Pairing Code mode...');
-connectToWhatsApp();
+// बोट चालू करें
+startBot();
