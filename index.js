@@ -1,175 +1,128 @@
-import makeWASocket, {
-  useMultiFileAuthState,
-  DisconnectReason
-} from "@whiskeysockets/baileys";
-
-import express from "express";
-import pino from "pino";
-import cron from "node-cron";
+import makeWASocket, { 
+    DisconnectReason, 
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion,
+    delay
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
+import express from 'express';
 
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const WA_NUMBER = process.env.WA_NUMBER;
 
-let sock;
-let settings = {
-  autoReply: false,
-  target: "",
-  reply: ""
-};
+app.get('/', (req, res) => res.send('Advanced WhatsApp Bot is active!'));
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
-async function startWhatsApp() {
-  const { state, saveCreds } =
-    await useMultiFileAuthState("./auth");
+const phoneNumber = process.env.PHONE_NUMBER || "YOUR_BOT_PHONE_NUMBER_HERE"; 
 
-  sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: "silent" })
-  });
+// ================= ADVANCED AUTO-REPLY CONFIGURATION =================
+const ADVANCED_REPLIES = [
+    {
+        keywords: ['hi', 'hello', 'hey', 'hello raja'],
+        reply: "Hello! Welcome to Raja's automation service. How can I help you today?"
+    },
+    {
+        keywords: ['price', 'cost', 'rate', 'fees'],
+        reply: "Our premium services start from just ₹499. Let me know your requirement!"
+    },
+    {
+        keywords: ['help', 'support', 'contact'],
+        reply: "You can raise a support ticket or drop your query right here. I'll pass it to my boss!"
+    },
+    {
+        keywords: ['owner', 'raja', 'admin'],
+        reply: "Raja is currently busy managing things. I am his official automated assistant."
+    }
+];
+// ======================================================================
 
-  sock.ev.on("creds.update", saveCreds);
+async function connectToWhatsApp() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    const { version } = await fetchLatestBaileysVersion();
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
+    const sock = makeWASocket({
+        auth: state,
+        version: version,
+        printQRInTerminal: false,
+        logger: undefined
+    });
 
-    if (
-      connection === "connecting" &&
-      !state.creds.registered &&
-      WA_NUMBER
-    ) {
-      try {
-        const code = await sock.requestPairingCode(WA_NUMBER);
-        console.log("================================");
-        console.log("PAIRING CODE:", code);
-        console.log("================================");
-      } catch (err) {
-        console.error("Pairing error:", err);
-      }
+    if (!sock.authState.creds.registered) {
+        if (!phoneNumber || phoneNumber === "YOUR_BOT_PHONE_NUMBER_HERE") {
+            console.error("❌ ERROR: Please provide a valid phone number!");
+            process.exit(1);
+        }
+
+        setTimeout(async () => {
+            try {
+                let code = await sock.requestPairingCode(phoneNumber);
+                code = code?.match(/.{1,4}/g)?.join('-') || code;
+                console.log(`\n======================================`);
+                console.log(`🔑 WHATSAPP PAIRING CODE: ${code}`);
+                console.log(`======================================\n`);
+            } catch (error) {
+                console.error("Failed to request pairing code:", error);
+            }
+        }, 3000);
     }
 
-    if (connection === "open") {
-      console.log("✅ WhatsApp connected");
-    }
+    sock.ev.on('creds.update', saveCreds);
 
-    if (connection === "close") {
-      console.log("❌ WhatsApp disconnected");
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Connection closed. Reconnecting...', shouldReconnect);
+            if (shouldReconnect) connectToWhatsApp();
+        } else if (connection === 'open') {
+            console.log('✅ Advanced WhatsApp connection opened successfully!');
+        }
+    });
 
-      const statusCode =
-        lastDisconnect?.error?.output?.statusCode;
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
 
-      if (statusCode !== DisconnectReason.loggedOut) {
-        setTimeout(startWhatsApp, 5000);
-      }
-    }
-  });
+        const remoteJid = msg.key.remoteJid;
+        
+        // Advanced Layer 1: Ignore Group Chats (Optional, remove this if you want it in groups)
+        if (remoteJid.endsWith('@g.us')) return; 
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
+        // Extract Text Cleanly
+        const incomingText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim().toLowerCase();
+        if (!incomingText) return;
 
-    if (!msg?.message) return;
-    if (msg.key.fromMe) return;
+        // Advanced Layer 2: Auto Read & Send Blue Tick
+        await sock.readMessages([msg.key]);
 
-    const jid = msg.key.remoteJid;
+        // Advanced Layer 3: Intent matching system
+        let finalResponse = "";
+        let matched = false;
 
-    if (
-      settings.autoReply &&
-      settings.target &&
-      jid === settings.target &&
-      settings.reply
-    ) {
-      await sock.sendMessage(jid, {
-        text: settings.reply
-      });
-    }
-  });
+        for (const rule of ADVANCED_REPLIES) {
+            if (rule.keywords.some(keyword => incomingText.includes(keyword))) {
+                finalResponse = rule.reply;
+                matched = true;
+                break;
+            }
+        }
+
+        // Smart Catch-All: User ne kuch alag message bheja toh standard reply code
+        if (!matched) {
+            finalResponse = `I received your message: "${incomingText}"`;
+        }
+
+        // Always append the user signature as requested
+        finalResponse = `${finalResponse} -raja`;
+
+        // Advanced Layer 4: Simulate human behavior (Show "typing..." status for 2 seconds)
+        await sock.sendPresenceUpdate('composing', remoteJid);
+        await delay(2000); // 2-second realistic delay
+        await sock.sendPresenceUpdate('paused', remoteJid);
+
+        // Send Finalized Smart Reply
+        await sock.sendMessage(remoteJid, { text: finalResponse }, { quoted: msg });
+    });
 }
 
-/* Dashboard API */
-
-app.get("/api/status", (req, res) => {
-  res.json({
-    connected: !!sock,
-    settings
-  });
-});
-
-app.post("/api/auto-reply", (req, res) => {
-  settings.autoReply = Boolean(req.body.enabled);
-  settings.target = req.body.target || "";
-  settings.reply = req.body.reply || "";
-
-  res.json({
-    ok: true,
-    settings
-  });
-});
-
-/* Manual individual message */
-
-app.post("/api/send", async (req, res) => {
-  try {
-    const { number, message } = req.body;
-
-    if (!number || !message) {
-      return res.status(400).json({
-        error: "number and message required"
-      });
-    }
-
-    await sock.sendMessage(`${number}@s.whatsapp.net`, {
-      text: message
-    });
-
-    res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "send failed" });
-  }
-});
-
-/* Scheduled message */
-
-app.post("/api/schedule", async (req, res) => {
-  const { number, message, time } = req.body;
-
-  if (!number || !message || !time) {
-    return res.status(400).json({
-      error: "number, message and time required"
-    });
-  }
-
-  const [hour, minute] = time.split(":");
-
-  cron.schedule(`${minute} ${hour} * * *`, async () => {
-    try {
-      await sock.sendMessage(`${number}@s.whatsapp.net`, {
-        text: message
-      });
-
-      console.log(
-        `Scheduled message sent to ${number} at ${time}`
-      );
-    } catch (err) {
-      console.error("Scheduled message failed:", err);
-    }
-  }, {
-    timezone: "Asia/Kolkata"
-  });
-
-  res.json({
-    ok: true,
-    message: `Scheduled for ${time}`
-  });
-});
-
-app.get("/", (req, res) => {
-  res.send("WhatsApp Bot Server Running");
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-startWhatsApp();
+connectToWhatsApp();
